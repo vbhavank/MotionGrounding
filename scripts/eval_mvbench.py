@@ -279,7 +279,7 @@ def main():
             correct = int(pred_index == gt_index)
             results_by_subset[subset]["total"] += 1
             results_by_subset[subset]["correct"] += correct
-            all_preds.append({"subset": subset, "gt": gt_index, "pred": pred_index, "correct": correct})
+            all_preds.append({"subset": subset, "gt": gt_index, "pred": pred_index, "correct": correct, "pred_text": pred_text})
         done_count += len(inputs_and_meta)
         elapsed = time.time() - t0
         print(f"  {done_count}/{len(all_samples)} ({100*done_count/len(all_samples):.0f}%) — {elapsed:.0f}s")
@@ -312,6 +312,7 @@ def main():
         "per_subset": {k: {"correct": v["correct"], "total": v["total"], "accuracy_pct": round(100.0 * v["correct"] / v["total"], 2) if v["total"] else 0} for k, v in results_by_subset.items()},
         "time_seconds": round(total_time, 1),
         "predictions_sample": all_preds[:100],
+        "predictions": all_preds,  # full text: scripts/analyze_tag_presence.py
     }
     output_file = args.output_file or "evaluation/logs/mvbench_logs/mvbench_results.json"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)

@@ -366,6 +366,7 @@ def main():
                 "gt": s["answer"],
                 "pred": pred_letter,
                 "pred_raw": pred_text[:200],
+                "pred_text": pred_text,
                 "correct": correct,
             })
 
@@ -407,6 +408,7 @@ def main():
         },
         "time_seconds": round(total_time, 1),
         "predictions_sample": all_preds[:100],
+        "predictions": all_preds,  # full text: scripts/analyze_tag_presence.py
     }
     output_file = args.output_file or "evaluation/logs/motionbench_logs/motionbench_results.json"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)

@@ -10,6 +10,10 @@
 
 See our IO page: https://ostadabbas.github.io/motion-o.github.io/
 
+## Revision in progress: MCoT v4
+
+[`revision/README.md`](revision/README.md) documents the v4 additions: tag/box self-consistency reward and schema check, equivariance-based grounding (time reversal, flip, speed-up, freeze), tag-intervention and tag-presence tests, majority/no-tag/oracle-box controls, piecewise, camera-compensated, relational and depth-based tags, and reversal-contrast pairs. It also records findings from the v3 code that affect the reported numbers and the list of paper corrections. CPU tests: `python -m pytest tests -q`.
+
 ## Core Contribution
 
 **Motion-aware trajectory reward** — evaluating not just *where* objects are, but *how they moved*, using geometric motion metrics derived from predicted bbox sequences.

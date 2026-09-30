@@ -253,7 +253,7 @@ def main():
                 "gt": gt_index,
                 "pred": pred_index,
                 "correct": correct,
-                "pred_text": pred_text[:200],
+                "pred_text": pred_text,
             })
         done_count += len(inputs_and_meta)
         elapsed = time.time() - t0
@@ -295,6 +295,7 @@ def main():
         },
         "time_seconds": round(total_time, 1),
         "predictions_sample": all_preds[:100],
+        "predictions": all_preds,  # full text: scripts/analyze_tag_presence.py
     }
     output_file = args.output_file or "evaluation/logs/tvbench_logs/tvbench_results.json"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)

@@ -53,6 +53,26 @@ from PIL import Image
 import numpy as np
 from typing import List, Dict, Any
 
+import re
+
+_MOTION_INSTRUCTION_RE = re.compile(
+    r"(After the last observation of each object|When reasoning about objects in the video, describe their motion using:)"
+    r".*?\{approaching, stable, receding\}\.\s*",
+    re.DOTALL,
+)
+
+
+def strip_motion_instructions(prepared: Dict[str, Any]) -> Dict[str, Any]:
+    """No-tag control (MCOT_NO_MOTION_PROMPT=1): drop <motion/> instructions
+    from the system prompt. Pair with scripts/strip_motion_tags.py data."""
+    for msg in prepared["messages"]:
+        if msg["role"] == "system":
+            for part in msg["content"]:
+                if part.get("type") == "text":
+                    part["text"] = _MOTION_INSTRUCTION_RE.sub("", part["text"])
+    return prepared
+
+
 def prepare_dataset(example: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     """Prepare dataset example for training."""
 
@@ -527,6 +547,8 @@ if __name__ == "__main__":
     # Prepare dataset
     from tqdm import tqdm 
     prepared_dataset = [prepare_dataset(example) for example in tqdm(dataset['train'], desc="Preparing dataset")]
+    if os.environ.get("MCOT_NO_MOTION_PROMPT", "0") == "1":
+        prepared_dataset = [strip_motion_instructions(p) for p in prepared_dataset]
 
     # Initialize wandb if specified
     if training_args.report_to == "wandb":
