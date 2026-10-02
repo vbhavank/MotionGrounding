@@ -55,6 +55,13 @@ reward_funcs_registry = {
 
 
 @dataclass
+class GRPOConfigV4(GRPOConfig):
+    """GRPOConfig plus fields that newer TRL removed but this trainer uses."""
+    max_prompt_length: Optional[int] = field(
+        default=512, metadata={"help": "Left-truncate prompts to this many tokens (removed from TRL 1.x)."})
+
+
+@dataclass
 class GRPOScriptArgumentsV4(ScriptArguments):
     reward_funcs: list[str] = field(
         default_factory=lambda: ["ans_acc", "ans_tiou", "ans_viou", "thk_temporal_point",
@@ -129,6 +136,6 @@ def main(script_args, training_args, model_args):
 
 
 if __name__ == "__main__":
-    parser = TrlParser((GRPOScriptArgumentsV4, GRPOConfig, ModelConfig))
+    parser = TrlParser((GRPOScriptArgumentsV4, GRPOConfigV4, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
     main(script_args, training_args, model_args)
