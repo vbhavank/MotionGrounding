@@ -40,7 +40,6 @@ from trl import (
     SFTConfig,
     SFTTrainer,
     TrlParser,
-    get_kbit_device_map,
     get_peft_config,
 )
 from accelerate import Accelerator
