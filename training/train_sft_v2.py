@@ -54,6 +54,22 @@ from typing import List, Dict, Any
 
 import re
 
+def load_json_dataset(path):
+    """Load a .json/.jsonl list of samples in memory.
+
+    Dataset.from_json writes a cache copy first and aborts with "Not enough disk
+    space" when the filesystem reports 0 free bytes (common on NFS with quotas).
+    Columns are the union of keys over all rows (from_list would use only the
+    first row's keys).
+    """
+    import json as _json
+    from datasets import Dataset as _Dataset
+    with open(path) as f:
+        rows = [_json.loads(l) for l in f if l.strip()] if path.endswith(".jsonl") else _json.load(f)
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    return _Dataset.from_dict({k: [r.get(k) for r in rows] for k in keys})
+
+
 _MOTION_INSTRUCTION_RE = re.compile(
     r"(After the last observation of each object|When reasoning about objects in the video, describe their motion using:)"
     r".*?\{approaching, stable, receding\}\.\s*",
@@ -474,7 +490,7 @@ if __name__ == "__main__":
 
     # Load dataset
     if script_args.dataset_name.endswith('.json') or script_args.dataset_name.endswith('.jsonl'):
-        dataset =  DatasetDict({"train": Dataset.from_json(script_args.dataset_name)})
+        dataset = DatasetDict({"train": load_json_dataset(script_args.dataset_name)})
     else:
         # Load the dataset
         dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)

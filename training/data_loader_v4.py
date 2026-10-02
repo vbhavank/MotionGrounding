@@ -45,6 +45,22 @@ FREE_TAIL = "The answer part only requires a text response; tags like <obj>, <bo
 MCQ_TAIL = "Only output the correct option in the <answer> </answer> section."
 
 
+def load_json_dataset(path):
+    """Load a .json/.jsonl list of samples in memory.
+
+    Dataset.from_json writes a cache copy first and aborts with "Not enough disk
+    space" when the filesystem reports 0 free bytes (common on NFS with quotas).
+    Columns are the union of keys over all rows (from_list would use only the
+    first row's keys).
+    """
+    import json as _json
+    from datasets import Dataset as _Dataset
+    with open(path) as f:
+        rows = [_json.loads(l) for l in f if l.strip()] if path.endswith(".jsonl") else _json.load(f)
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    return _Dataset.from_dict({k: [r.get(k) for r in rows] for k in keys})
+
+
 def build_system_prompts(motion_prompt: bool = True, piecewise_prompt: bool = False) -> dict:
     motion = (MOTION_RULE + (PIECEWISE_RULE if piecewise_prompt else "")) if motion_prompt else ""
     prompts = dict(SYSTEM_PROMPT_V3)
@@ -74,7 +90,7 @@ def get_data(script_args):
         return example
 
     if script_args.dataset_name.endswith((".json", ".jsonl")):
-        dataset = DatasetDict({"train": Dataset.from_json(script_args.dataset_name)})
+        dataset = DatasetDict({"train": load_json_dataset(script_args.dataset_name)})
     else:
         dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
     dataset = dataset.map(make_conversation)
