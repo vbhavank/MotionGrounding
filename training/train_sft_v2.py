@@ -546,6 +546,20 @@ if __name__ == "__main__":
         # AutoModelForVision2Seq not available in transformers 5.x
         raise ValueError(f"Unsupported model: {model_config.model_name_or_path}. Only Qwen2-VL and Qwen2.5-VL are supported.")
     
+    # transformers 5.x renamed `torch_dtype` to `dtype`; enforce the requested dtype either way
+    # (on V100s a silently-kept bf16 checkpoint fails in the vision patch-embed Conv3d).
+    if isinstance(torch_dtype, torch.dtype) and model.dtype != torch_dtype:
+        model = model.to(torch_dtype)
+    print(f"[model] dtype={model.dtype}")
+    # cuDNN has no Conv3d engine for some half-precision shapes on pre-Ampere GPUs (V100,
+    # "GET was unable to find an engine"). The Conv3d patch embedding is the only conv in the
+    # model, so disabling cuDNN there costs nothing measurable. MCOT_DISABLE_CUDNN=0/1 overrides.
+    _flag = os.environ.get("MCOT_DISABLE_CUDNN")
+    if _flag == "1" or (_flag is None and torch.cuda.is_available()
+                        and torch.cuda.get_device_capability(0) < (8, 0)):
+        torch.backends.cudnn.enabled = False
+        print("[model] cuDNN disabled (pre-Ampere GPU or MCOT_DISABLE_CUDNN=1)")
+
     # CRITICAL: For ZeRO-2 with CPU offloading, move model to GPU to avoid device mismatch
     # But keep it in fp32/bf16 to let DeepSpeed manage memory efficiently
     import os
