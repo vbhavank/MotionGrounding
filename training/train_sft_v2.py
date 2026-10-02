@@ -491,11 +491,9 @@ if __name__ == "__main__":
         training_args.save_steps = max(1, max_samples // 2)  # Save checkpoint midway
 
     # Setup model
-    torch_dtype = (
-        model_config.torch_dtype
-        if model_config.torch_dtype in ["auto", None]
-        else getattr(torch, model_config.torch_dtype)
-    )
+    # TRL renamed ModelConfig.torch_dtype to ModelConfig.dtype (pass --dtype on new TRL)
+    dtype_name = getattr(model_config, "torch_dtype", None) or getattr(model_config, "dtype", None)
+    torch_dtype = dtype_name if dtype_name in ["auto", None] else getattr(torch, dtype_name)
 
     # # Quantization configuration for 4-bit training
     # bnb_config = BitsAndBytesConfig(
