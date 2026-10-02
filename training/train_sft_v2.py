@@ -348,6 +348,12 @@ def replace_boxes_for_gemini_data(text, image_size):
     
     return pattern.sub(replacer, text)
 
+def json_collate_fn(examples):
+    """Decode samples stored as JSON strings (see train_dataset construction)."""
+    return collate_fn([json.loads(e["sample"]) if isinstance(e, dict) and "sample" in e else e
+                       for e in examples])
+
+
 def collate_fn(examples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     """Collate batch of examples for training."""
     texts = []
@@ -563,6 +569,11 @@ if __name__ == "__main__":
     if os.environ.get("MCOT_NO_MOTION_PROMPT", "0") == "1":
         prepared_dataset = [strip_motion_instructions(p) for p in prepared_dataset]
 
+    # TRL >= 1.0 requires a datasets.Dataset. Each prepared sample is stored as a JSON
+    # string so its nested message dicts keep their exact keys (Arrow would add None-filled
+    # fields); json_collate_fn decodes them before the original collate_fn.
+    train_dataset = Dataset.from_dict({"sample": [json.dumps(p) for p in prepared_dataset]})
+
     # Initialize wandb if specified
     if training_args.report_to == "wandb":
         wandb.init(project="video-llm-training")
@@ -571,8 +582,8 @@ if __name__ == "__main__":
     trainer = MySFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=prepared_dataset,
-        data_collator=collate_fn,
+        train_dataset=train_dataset,
+        data_collator=json_collate_fn,
         peft_config=get_peft_config(model_config),
     )
 
