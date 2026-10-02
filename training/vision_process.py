@@ -256,10 +256,80 @@ def _read_video_decord(
     return video, sample_fps
 
 
+def is_opencv_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("cv2") is not None
+
+
+def _read_video_opencv(
+    ele: dict,
+) -> (torch.Tensor, float):
+    """read video with OpenCV (fallback when decord is missing and torchvision has
+    no io.read_video, which newer torchvision releases removed).
+
+    Same sampling as the decord reader (smart_nframes + uniform linspace); also
+    honours video_start / video_end. Returns a uint8 (T, C, H, W) tensor.
+    """
+    import cv2
+    import numpy as np
+
+    video_path = ele["video"]
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+    st = time.time()
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"OpenCV cannot open {video_path}")
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:  # container without a frame count: count by decoding
+        while cap.grab():
+            total_frames += 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    start = max(0, int(round(float(ele.get("video_start", 0.0) or 0.0) * video_fps)))
+    end = total_frames - 1
+    if ele.get("video_end") is not None:
+        end = min(end, int(round(float(ele["video_end"]) * video_fps)))
+    if end < start:
+        raise RuntimeError(f"empty clip [{start}, {end}] in {video_path}")
+    span = end - start + 1
+    nframes = smart_nframes(ele, total_frames=span, video_fps=video_fps)
+    idx = np.linspace(start, end, nframes).round().astype(int).tolist()
+    want = {}
+    for i in idx:
+        want[i] = want.get(i, 0) + 1
+    frames = []
+    if start:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    for i in range(start, max(idx) + 1):
+        if not cap.grab():
+            break
+        if i in want:
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.extend([frame] * want[i])
+    cap.release()
+    if not frames:
+        raise RuntimeError(f"OpenCV decoded no frames from {video_path}")
+    while len(frames) < nframes:  # frame count in the header overstated the video
+        frames.append(frames[-1])
+    video = torch.from_numpy(np.stack(frames[:nframes])).permute(0, 3, 1, 2)
+    logger.info(f"opencv:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
+    sample_fps = nframes / max(span, 1e-6) * video_fps
+    return video, sample_fps
+
+
 VIDEO_READER_BACKENDS = {
     "decord": _read_video_decord,
+    "opencv": _read_video_opencv,
     "torchvision": _read_video_torchvision,
 }
+
+# torchvision >= 0.24 removed io.read_video; never fall back to it there.
+_FALLBACK_BACKEND = "opencv" if (is_opencv_available() or not hasattr(io, "read_video")) else "torchvision"
 
 FORCE_QWENVL_VIDEO_READER = os.getenv("FORCE_QWENVL_VIDEO_READER", None)
 
@@ -271,7 +341,7 @@ def get_video_reader_backend() -> str:
     elif is_decord_available():
         video_reader_backend = "decord"
     else:
-        video_reader_backend = "torchvision"
+        video_reader_backend = _FALLBACK_BACKEND
     print(f"qwen-vl-utils using {video_reader_backend} to read video.", file=sys.stderr)
     return video_reader_backend
 
@@ -282,8 +352,10 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, return_video_sample
         try:
             video, sample_fps = VIDEO_READER_BACKENDS[video_reader_backend](ele)
         except Exception as e:
-            logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
-            video, sample_fps = VIDEO_READER_BACKENDS["torchvision"](ele)
+            if video_reader_backend == _FALLBACK_BACKEND:
+                raise
+            logger.warning(f"video_reader_backend {video_reader_backend} error, use {_FALLBACK_BACKEND}, msg: {e}")
+            video, sample_fps = VIDEO_READER_BACKENDS[_FALLBACK_BACKEND](ele)
 
         nframes, _, height, width = video.shape
         min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
