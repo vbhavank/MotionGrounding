@@ -2,7 +2,11 @@
 """
 Build leakage-free SFT / RL / held-out files for MCoT v4 from what is on disk.
 
-* PLM rows in the SFT file are replaced by their dense versions (same ids).
+* PLM rows in the SFT file are replaced by their dense versions (same ids),
+  unless the injected (mask-derived) boxes and the original STGR boxes of some
+  track differ in median area by more than --dense_max_area_ratio (default 4x);
+  those rows keep their sparse version. Dense rows must be labeled from all
+  boxes (relabel_motion_v4.py) so each tag matches the boxes in its reasoning.
 * A held-out set of VIDEOS (not sample ids) is drawn from the grounded
   temporal-spatial rows, proportionally per source; every SFT and RL row whose
   video is held out is removed, so no held-out video is ever trained on.
@@ -33,6 +37,23 @@ def has_motion_target(r):
     return bool(mc.gt_motion_from_key_items(r.get("key_items") or {}, r.get("key_frames") or []))
 
 
+def scale_consistent(dense_row, sparse_row, max_ratio):
+    """True if, for every track, injected and original boxes agree in scale."""
+    import statistics as st
+    if not sparse_row:
+        return True
+    otimes = {round(float(f["time"]), 2) for f in sparse_row.get("key_frames") or []}
+    for track in mc.tracks_from_key_items(dense_row.get("key_items") or {},
+                                          dense_row.get("key_frames") or []).values():
+        orig = [mc.area(b) for t, b in track if round(t, 2) in otimes and mc.area(b) > 0]
+        inj = [mc.area(b) for t, b in track if round(t, 2) not in otimes and mc.area(b) > 0]
+        if orig and inj:
+            ratio = st.median(inj) / st.median(orig)
+            if ratio > max_ratio or ratio < 1.0 / max_ratio:
+                return False
+    return True
+
+
 def notag(rows):
     out = []
     for r in rows:
@@ -52,6 +73,8 @@ def main():
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--heldout_videos", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dense_max_area_ratio", type=float, default=4.0,
+                    help="fall back to the sparse row when injected/original box areas differ more than this")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     out = Path(args.out_dir)
@@ -60,8 +83,19 @@ def main():
     sft = json.load(open(args.sft))
     rl = json.load(open(args.rl))
     dense = {r["id"]: r for r in json.load(open(args.plm_dense))} if args.plm_dense else {}
-    sft = [dense.get(r.get("id"), r) for r in sft]
-    print(f"SFT rows {len(sft)} ({sum(r.get('id') in dense for r in sft)} replaced by dense PLM), RL rows {len(rl)}")
+    n_dense = n_fallback = 0
+    merged = []
+    for r in sft:
+        d = dense.get(r.get("id"))
+        if d is not None and scale_consistent(d, r, args.dense_max_area_ratio):
+            merged.append(d)
+            n_dense += 1
+        else:
+            n_fallback += d is not None
+            merged.append(r)
+    sft = merged
+    print(f"SFT rows {len(sft)} ({n_dense} dense PLM, {n_fallback} kept sparse: box sources differ "
+          f">{args.dense_max_area_ratio:g}x in area), RL rows {len(rl)}")
 
     # candidate held-out videos: grounded rows with a motion target, per source
     by_source = defaultdict(set)
