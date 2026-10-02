@@ -524,7 +524,7 @@ if __name__ == "__main__":
     # Then DeepSpeed will handle sharding and device placement
     model_kwargs = dict(
         revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
+        trust_remote_code=getattr(model_config, "trust_remote_code", False),
         torch_dtype=torch_dtype,
         # device_map=get_kbit_device_map(),  # Not needed for DeepSpeed
         # quantization_config=bnb_config,
@@ -554,7 +554,7 @@ if __name__ == "__main__":
 
     processor = AutoProcessor.from_pretrained(
         model_config.model_name_or_path,
-        trust_remote_code=model_config.trust_remote_code
+        trust_remote_code=getattr(model_config, "trust_remote_code", False)
     )
 
     # Prepare dataset
