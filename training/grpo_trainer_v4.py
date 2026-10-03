@@ -31,7 +31,8 @@ from typing import Dict, List, Optional
 import torch
 from PIL import Image
 import numpy as np
-from transformers import GenerationConfig, PreTrainedModel, Trainer
+from transformers import (GenerationConfig, PreTrainedModel, Qwen2VLForConditionalGeneration,
+                          Qwen2_5_VLForConditionalGeneration, Trainer)
 from trl.data_utils import is_conversational, maybe_apply_chat_template
 from trl.models import unwrap_model_for_generation
 
@@ -64,6 +65,25 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
                  freeze_span: str = "first_keyframe",
                  reward_weights: Optional[List[float]] = None,
                  **kwargs):
+        # Pre-Ampere GPUs (V100): no bf16, and cuDNN lacks a half-precision Conv3d engine for
+        # the vision patch embedding. MCOT_DTYPE=float16 preloads and casts the model here
+        # (transformers 5.x may ignore torch_dtype); cuDNN is disabled below compute 8.0.
+        flag = os.environ.get("MCOT_DISABLE_CUDNN")
+        if flag == "1" or (flag is None and torch.cuda.is_available()
+                           and torch.cuda.get_device_capability(0) < (8, 0)):
+            torch.backends.cudnn.enabled = False
+            print("[v4] cuDNN disabled (pre-Ampere GPU or MCOT_DISABLE_CUDNN=1)")
+        dtype_name = os.environ.get("MCOT_DTYPE")
+        if dtype_name and isinstance(kwargs.get("model"), str):
+            path, dtype = kwargs["model"], getattr(torch, dtype_name)
+            cls = Qwen2VLForConditionalGeneration if "Qwen2-VL" in path else Qwen2_5_VLForConditionalGeneration
+            model = cls.from_pretrained(path, attn_implementation=kwargs.get("attn_implementation", "eager"))
+            model = model.to(dtype)
+            if kwargs.get("args") is not None:
+                model.config.use_cache = not kwargs["args"].gradient_checkpointing
+                kwargs["args"].model_init_kwargs = None
+            kwargs["model"] = model
+            print(f"[v4] model preloaded as {model.dtype}")
         super().__init__(*args, **kwargs)
         self.equiv_transforms = list(equiv_transforms or [])
         self.equiv_reward_funcs = list(equiv_reward_funcs or [])

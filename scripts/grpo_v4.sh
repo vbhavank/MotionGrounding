@@ -23,6 +23,8 @@
 #   SEED        default 42; run >= 3 seeds and report mean +- std
 #   LAMBDA_SELF weight of r_self (default 0.5)
 #   EQUIV       transformations, default "reverse hflip freeze"
+#   NPROC       GPUs on this node to use (default 2)
+#   PRECISION   bf16 (default, A100/H100) | fp16 (V100: also sets MCOT_DTYPE=float16)
 #
 # Example (3 seeds x 2 variants):
 #   for s in 42 43 44; do
@@ -39,6 +41,14 @@ EQUIV="${EQUIV:-reverse hflip freeze}"
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to the SFT checkpoint}"
 DATASET_JSON="${DATASET_JSON:?set DATASET_JSON to the RL json}"
 MASTER_PORT="${MASTER_PORT:-12331}"
+NPROC="${NPROC:-2}"
+PRECISION="${PRECISION:-bf16}"
+if [ "$PRECISION" = "fp16" ]; then
+  PREC_ARGS=(--fp16 true --bf16 false)
+  export MCOT_DTYPE=float16
+else
+  PREC_ARGS=(--bf16 true)
+fi
 EXP_NAME="grpo_v4_${VARIANT}_s${SEED}_${SLURM_JOB_ID:-local}"
 OUT_DIR="outputs/${EXP_NAME}"
 
@@ -81,7 +91,7 @@ LATEST_CKPT=$(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | ta
 
 echo "variant=$VARIANT seed=$SEED model=$MODEL_PATH data=$DATASET_JSON out=$OUT_DIR"
 
-torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 \
+torchrun --nproc_per_node="$NPROC" --nnodes=1 --node_rank=0 \
     --master_addr=127.0.0.1 --master_port="$MASTER_PORT" \
     training/train_grpo_v4.py \
     --output_dir "$OUT_DIR" \
@@ -94,7 +104,7 @@ torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 \
     --equiv_num_generations 2 --equiv_per_step 1 \
     --max_prompt_length 16384 --max_completion_length 768 --max_pixels 401408 \
     --learning_rate 5e-7 --lr_scheduler_type cosine --weight_decay 0.01 \
-    --bf16 true --gradient_checkpointing true --attn_implementation eager \
+    "${PREC_ARGS[@]}" --gradient_checkpointing true --attn_implementation eager \
     --num_train_epochs 1 --beta 0.04 --max_grad_norm 5 \
     --logging_steps 25 --save_steps 200 --save_only_model true \
     --report_to wandb --run_name "$EXP_NAME" \
