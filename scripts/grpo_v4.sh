@@ -24,6 +24,7 @@
 #   LAMBDA_SELF weight of r_self (default 0.5)
 #   EQUIV       transformations, default "reverse hflip freeze"
 #   NPROC       GPUs on this node to use (default 2)
+#   extra args  appended last, so they override defaults, e.g. --num_generations 2
 #   PRECISION   bf16 (default, A100/H100) | fp16 (V100: also sets MCOT_DTYPE=float16)
 #
 # Example (3 seeds x 2 variants):
@@ -111,4 +112,5 @@ torchrun --nproc_per_node="$NPROC" --nnodes=1 --node_rank=0 \
     --seed "$SEED" --data_seed "$SEED" \
     --gen_temperature 0.7 \
     ${RESUME_ARG[@]+"${RESUME_ARG[@]}"} \
-    "${REWARD_ARGS[@]}"
+    "${REWARD_ARGS[@]}" \
+    "$@"
