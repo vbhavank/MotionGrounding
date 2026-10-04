@@ -12,3 +12,11 @@ scipy>=1.11.0
 tqdm>=4.66.0
 pycocotools>=2.0.7
 numpy>=1.24.0
+rouge-score>=0.1.2        # free-form answer reward (training/reward_func_v3.py)
+wandb                     # imported by training scripts (use --report_to none / WANDB_MODE=offline)
+requests
+packaging
+# optional
+# decord                  # faster video decoding (OpenCV fallback otherwise)
+# vllm                    # eval backend on compute>=8.0 GPUs (--backend hf otherwise)
+# pytest                  # tests/
