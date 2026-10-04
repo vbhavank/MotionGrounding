@@ -48,7 +48,7 @@ def main():
     args = ap.parse_args()
 
     from mcot_eval_common import (LETTER_SYSTEM_PROMPT, MOTION_SYSTEM_PROMPT, build_prompt, extract_letter,
-                                  generate, load_video, make_llm)
+                                  generate, load_clip, make_llm, reverse_clip)
     system = MOTION_SYSTEM_PROMPT if args.prompt == "mcot" else LETTER_SYSTEM_PROMPT
     pairs = json.load(open(args.pairs_json))
     pairs = pairs[: args.max_pairs] if args.max_pairs else pairs
@@ -57,14 +57,15 @@ def main():
     jobs, kept = [], []
     for p in pairs:
         try:
-            v, fps = load_video(p["video_path_full"], args.video_max_pixels, args.video_max_frames)
+            v = load_clip(args, p["video_path_full"])  # no keyframes: they would break the reversal
         except Exception as e:
             print(f"skip {p['id']}: {e}")
             continue
-        duration = len(v) / fps
-        v_rev = v[::-1].copy()
-        jobs.append((build_prompt(processor, system, question(p, p["t0"], p["t1"])), v))
-        jobs.append((build_prompt(processor, system, question(p, duration - p["t1"], duration - p["t0"])), v_rev))
+        duration = v["total"]
+        v_rev = reverse_clip(v)
+        jobs.append((build_prompt(processor, system, question(p, p["t0"], p["t1"]), clip=v), v))
+        jobs.append((build_prompt(processor, system, question(p, duration - p["t1"], duration - p["t0"]),
+                                  clip=v_rev), v_rev))
         kept.append(p)
     texts = generate(llm, sp, jobs, args.batch_size)
 

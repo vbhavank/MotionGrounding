@@ -91,7 +91,7 @@ def main():
     ap.add_argument("--output_file", required=True)
     args = ap.parse_args()
 
-    from mcot_eval_common import MOTION_SYSTEM_PROMPT, build_prompt, generate, load_video, make_llm
+    from mcot_eval_common import MOTION_SYSTEM_PROMPT, build_prompt, generate, load_clip, make_llm
     data = json.load(open(args.input_json))
     if args.motion_questions_only:
         data = [s for s in data if MOTION_Q.search(s["question"])]
@@ -101,13 +101,13 @@ def main():
     videos, prompts, kept = [], [], []
     for s in data:
         try:
-            v, _ = load_video(s["video_path_full"], args.video_max_pixels, args.video_max_frames)
+            v = load_clip(args, s["video_path_full"], s)
         except Exception as e:
             print(f"skip {s.get('id')}: {e}")
             continue
         kept.append(s)
         videos.append(v)
-        prompts.append(build_prompt(processor, MOTION_SYSTEM_PROMPT, format_question(s)))
+        prompts.append(build_prompt(processor, MOTION_SYSTEM_PROMPT, format_question(s), clip=v))
     first = generate(llm, sp, list(zip(prompts, videos)), args.batch_size)
 
     cf_jobs, ctl_jobs, meta = [], [], []

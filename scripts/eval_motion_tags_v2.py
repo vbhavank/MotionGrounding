@@ -19,6 +19,10 @@ Differences from scripts/eval_motion_tags.py
 
     python scripts/eval_motion_tags_v2.py --model_path M --dataset_json EVAL.json \
         --exclude_json STGR-SFT-motion-mixed.json --output_file out.json [--oracle_boxes]
+
+  * Input format follows training (timestamped frames, training frame size);
+    ``--frame_format video --video_max_pixels 2097152`` reproduces v1, and
+    ``--insert_keyframes`` adds the annotated keyframes as in training.
 """
 
 import argparse
@@ -51,14 +55,18 @@ def gt_labels(sample, source):
                                        min_observations=2)
 
 
-def oracle_prefix(sample):
-    """<think> pre-filled with GT grounded claims for every tracked object."""
+def oracle_prefix(sample, image_size=None):
+    """<think> pre-filled with GT grounded claims for every tracked object.
+
+    With ``image_size`` (W, H) the boxes are written in pixels of the frames the
+    model sees, as in the SFT targets; otherwise normalized boxes stay as is."""
     tracks = mc.tracks_from_key_items(sample.get("key_items") or {}, sample.get("key_frames") or [])
     parts = []
     for name, tr in tracks.items():
         if len(tr) < 2:
             continue
         for t, b in tr:
+            b = mc.to_pixels(b, image_size)
             box = ",".join(f"{v:.3f}" if mc.is_normalized(b) else f"{int(round(v))}" for v in b)
             parts.append(f"<obj>{name}</obj><box>[{box}]</box>at<t>{t:.1f}</t>s")
     return "<think>" + " ".join(parts) + " "
@@ -134,7 +142,7 @@ def main():
         print(json.dumps(metrics, indent=2, default=str)[:4000])
         return
 
-    from mcot_eval_common import MOTION_SYSTEM_PROMPT, build_prompt, generate, load_video, make_llm
+    from mcot_eval_common import MOTION_SYSTEM_PROMPT, build_prompt, clip_size, generate, load_clip, make_llm
     data = json.load(open(args.dataset_json))
     exclude = set()
     if args.exclude_json:
@@ -152,14 +160,16 @@ def main():
     jobs, oracle_jobs, kept = [], [], []
     for s in samples:
         try:
-            video, _ = load_video(s["video_path_full"], args.video_max_pixels, args.video_max_frames)
+            clip = load_clip(args, s["video_path_full"], s)
         except Exception as e:
             print(f"skip {s.get('id')}: {e}")
             continue
         kept.append(s)
-        jobs.append((build_prompt(processor, MOTION_SYSTEM_PROMPT, s["question"]), video))
+        jobs.append((build_prompt(processor, MOTION_SYSTEM_PROMPT, s["question"], clip=clip), clip))
         if args.oracle_boxes:
-            oracle_jobs.append((build_prompt(processor, MOTION_SYSTEM_PROMPT, s["question"], oracle_prefix(s)), video))
+            size = clip_size(clip) if clip["format"] == "images" else None
+            oracle_jobs.append((build_prompt(processor, MOTION_SYSTEM_PROMPT, s["question"],
+                                             oracle_prefix(s, size), clip=clip), clip))
     texts = generate(llm, sp, jobs, args.batch_size)
     oracle_texts = generate(llm, sp, oracle_jobs, args.batch_size) if oracle_jobs else [None] * len(kept)
 
