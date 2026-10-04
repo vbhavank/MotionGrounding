@@ -24,6 +24,8 @@
 #   LAMBDA_SELF weight of r_self (default 0.5)
 #   EQUIV       transformations, default "reverse hflip freeze"
 #   NPROC       GPUs on this node to use (default 2)
+#   OUT_DIR     default outputs/grpo_v4_<variant>_s<seed>_<job>; reruns resume from its latest
+#               checkpoint. QUICK_TEST=true uses a separate *_quicktest dir, wiped on each run.
 #   extra args  appended last, so they override defaults, e.g. --num_generations 2
 #   PRECISION   bf16 (default, A100/H100) | fp16 (V100: also sets MCOT_DTYPE=float16)
 #   ATTN        attention implementation; default eager (bf16) / sdpa (fp16). Eager attention
@@ -56,7 +58,9 @@ else
   ATTN="${ATTN:-eager}"
 fi
 EXP_NAME="grpo_v4_${VARIANT}_s${SEED}_${SLURM_JOB_ID:-local}"
-OUT_DIR="outputs/${EXP_NAME}"
+QUICK_TEST="${QUICK_TEST:-false}"
+[ "$QUICK_TEST" = "true" ] && EXP_NAME="${EXP_NAME}_quicktest"
+OUT_DIR="${OUT_DIR:-outputs/${EXP_NAME}}"
 
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$(pwd):$(pwd)/training"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -91,9 +95,15 @@ case "$VARIANT" in
   *) echo "unknown VARIANT=$VARIANT"; exit 1 ;;
 esac
 
+# Auto-resume from the latest checkpoint in OUT_DIR (never for QUICK_TEST: a finished
+# smoke test would otherwise "resume" at the last step and exit without training)
 RESUME_ARG=()
-LATEST_CKPT=$(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
-[ -n "$LATEST_CKPT" ] && RESUME_ARG=(--resume_from_checkpoint "$LATEST_CKPT")
+if [ "$QUICK_TEST" = "true" ]; then
+  rm -rf "$OUT_DIR"
+else
+  LATEST_CKPT=$(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
+  [ -n "$LATEST_CKPT" ] && RESUME_ARG=(--resume_from_checkpoint "$LATEST_CKPT")
+fi
 
 echo "variant=$VARIANT seed=$SEED model=$MODEL_PATH data=$DATASET_JSON out=$OUT_DIR"
 
