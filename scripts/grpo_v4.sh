@@ -99,7 +99,7 @@ esac
 # smoke test would otherwise "resume" at the last step and exit without training)
 RESUME_ARG=()
 if [ "$QUICK_TEST" = "true" ]; then
-  rm -rf "$OUT_DIR"
+  case "$OUT_DIR" in *_quicktest) rm -rf "$OUT_DIR" ;; esac
 else
   LATEST_CKPT=$(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
   [ -n "$LATEST_CKPT" ] && RESUME_ARG=(--resume_from_checkpoint "$LATEST_CKPT")
