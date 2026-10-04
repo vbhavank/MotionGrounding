@@ -210,8 +210,16 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
             prompt_inputs["attention_mask"] = prompt_inputs["attention_mask"][:, -self.max_prompt_length:]
         gen_cfg = copy.deepcopy(self.generation_config)
         gen_cfg.num_return_sequences = n
+        # gradient checkpointing sets config.use_cache=False, which would re-encode the whole
+        # video prompt for every new token; sample in eval mode with the KV cache instead
+        gen_cfg.use_cache = True
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped:
-            ids = unwrapped.generate(**prompt_inputs, generation_config=gen_cfg)
+            was_training = unwrapped.training
+            unwrapped.eval()
+            try:
+                ids = unwrapped.generate(**prompt_inputs, generation_config=gen_cfg)
+            finally:
+                unwrapped.train(was_training)
         prompt_len = prompt_inputs["input_ids"].size(1)
         completion = ids[:, prompt_len:]
         pad = self.processing_class.pad_token_id
