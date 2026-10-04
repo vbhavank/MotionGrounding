@@ -28,6 +28,22 @@ from transformers import (
 )
 
 
+def _get_vocab(config):
+    v = getattr(config, "vocab_size", None)
+    if v is None and getattr(config, "text_config", None) is not None:
+        v = getattr(config.text_config, "vocab_size", None)
+    return v
+
+
+def _set_vocab(config, vocab):
+    if getattr(config, "text_config", None) is not None:
+        config.text_config.vocab_size = vocab
+    try:
+        config.vocab_size = vocab
+    except AttributeError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Merge LoRA adapter into Qwen2.5-VL base")
     parser.add_argument("--base", required=True, help="Path to the base model (before SFT)")
@@ -64,7 +80,11 @@ def main():
         device_map="cpu",
     )
 
-    base_vocab = base_model.config.vocab_size
+    # transformers 5.x may ignore torch_dtype: enforce it (V100s need float16)
+    base_model = base_model.to(torch_dtype)
+    print(f"  Base dtype:         {base_model.dtype}")
+    # transformers 5.x keeps vocab_size in config.text_config
+    base_vocab = _get_vocab(base_model.config)
     embed_layer = getattr(base_model.model, 'embed_tokens', None) or getattr(base_model.model.language_model, 'embed_tokens', None)
     base_embed_shape = embed_layer.weight.shape if embed_layer else (base_vocab, "unknown")
     print(f"  Base vocab_size:    {base_vocab}")
@@ -107,16 +127,15 @@ def main():
     print("\n[4/5] Fixing config and saving...")
 
     # Ensure vocab_size is set correctly (PEFT merge bug often sets it to None)
-    merged_model.config.vocab_size = base_vocab
-    # Restore vision token IDs from base config
+    _set_vocab(merged_model.config, base_vocab)
+    # Restore vision token IDs from base config if the merge dropped them (scalars only;
+    # vision_config / rope_scaling are sub-configs in transformers 5.x and are left as loaded)
     base_config = json.loads(open(os.path.join(args.base, "config.json")).read())
-    for key in [
-        "image_token_id", "video_token_id", "vision_token_id",
-        "vision_start_token_id", "vision_end_token_id",
-        "vision_config", "rope_scaling",
-    ]:
-        if key in base_config:
+    for key in ["image_token_id", "video_token_id", "vision_token_id",
+                "vision_start_token_id", "vision_end_token_id"]:
+        if key in base_config and getattr(merged_model.config, key, None) is None:
             setattr(merged_model.config, key, base_config[key])
+    merged_model = merged_model.to(torch_dtype)
 
     merged_model.config.use_cache = True
     merged_model.save_pretrained(args.output, safe_serialization=True)
@@ -124,9 +143,9 @@ def main():
 
     # Verify saved config
     saved_cfg = json.loads(open(os.path.join(args.output, "config.json")).read())
-    assert saved_cfg.get("vocab_size") == base_vocab, \
-        f"Saved config vocab_size={saved_cfg.get('vocab_size')}, expected {base_vocab}"
-    print(f"  Verified: saved config.json has vocab_size={saved_cfg['vocab_size']}")
+    saved_vocab = saved_cfg.get("vocab_size") or (saved_cfg.get("text_config") or {}).get("vocab_size")
+    assert saved_vocab == base_vocab, f"Saved config vocab_size={saved_vocab}, expected {base_vocab}"
+    print(f"  Verified: saved config.json has vocab_size={saved_vocab}")
 
     # --- Copy processor/tokenizer from base ---
     print("\n[5/5] Copying processor & tokenizer from base...")
