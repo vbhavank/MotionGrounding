@@ -274,15 +274,35 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
                                           dtype=torch.float32, device=device)
         return per_func, (per_func * weights.to(device)).sum(dim=1)
 
+    @staticmethod
+    def _completion_logps(model, ids, prompt_len, vis):
+        """log p(token) for the completion tokens only.
+
+        Same values as v3's ``_get_per_token_logps(...)[:, prompt_len - 1:]``, but the LM
+        head runs on the completion positions only (``logits_to_keep``) and the
+        log-softmax is a per-row fp32 logsumexp, instead of materialising
+        (B, prompt+completion, 152k) logits (OOM on a 32 GB V100 with video prompts).
+        """
+        k = ids.size(1) - prompt_len
+        logits = model(ids, logits_to_keep=k + 1, **vis).logits[:, :-1]  # predicts ids[:, -k:]
+        target = ids[:, -k:]
+        out = []
+        for lg, tgt in zip(logits, target):
+            lg = lg.float()
+            out.append(lg.gather(1, tgt.unsqueeze(1)).squeeze(1) - torch.logsumexp(lg, dim=-1))
+        return torch.stack(out)
+
     def _gspo_loss(self, model, gen, rewards):
         ids, pl, mask = gen["ids"], gen["prompt_len"], gen["mask"]
-        logps = self._get_per_token_logps(model, ids, **gen["vis"])[:, pl - 1:]
+        # reference first, so its activations are freed before the policy graph is built
         with torch.inference_mode():
             if self.ref_model is not None:
-                ref = self._get_per_token_logps(self.ref_model, ids, **gen["vis"])[:, pl - 1:]
+                ref = self._completion_logps(self.ref_model, ids, pl, gen["vis"])
             else:
                 with self.accelerator.unwrap_model(model).disable_adapter():
-                    ref = self._get_per_token_logps(model, ids, **gen["vis"])[:, pl - 1:]
+                    ref = self._completion_logps(model, ids, pl, gen["vis"])
+        ref = ref.clone()  # inference tensors cannot enter autograd ops
+        logps = self._completion_logps(model, ids, pl, gen["vis"])
         x = torch.clamp(ref - logps, min=-10, max=10)
         kl = torch.exp(x) - x - 1
         std = rewards.std() if rewards.numel() > 1 else torch.zeros((), device=rewards.device)
