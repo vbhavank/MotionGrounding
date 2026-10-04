@@ -206,8 +206,11 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
         prompt_inputs.pop("_text", None)
         prompt_inputs = Trainer._prepare_inputs(self, prompt_inputs)
         if self.max_prompt_length is not None:
-            prompt_inputs["input_ids"] = prompt_inputs["input_ids"][:, -self.max_prompt_length:]
-            prompt_inputs["attention_mask"] = prompt_inputs["attention_mask"][:, -self.max_prompt_length:]
+            # per-token arrays (input_ids, attention_mask, mm_token_type_ids on transformers 5.x)
+            seq_keys = [k for k, v in prompt_inputs.items() if torch.is_tensor(v) and v.dim() == 2
+                        and v.shape == prompt_inputs["input_ids"].shape]
+            for k in seq_keys:
+                prompt_inputs[k] = prompt_inputs[k][:, -self.max_prompt_length:]
         gen_cfg = copy.deepcopy(self.generation_config)
         gen_cfg.num_return_sequences = n
         # gradient checkpointing sets config.use_cache=False, which would re-encode the whole
@@ -234,7 +237,18 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
         seq = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         mask = (seq <= eos_idx.unsqueeze(1)).int()
 
-        vis = {k: v for k, v in prompt_inputs.items() if k not in ("input_ids", "attention_mask", "second_per_grid_ts")}
+        vis = {k: v for k, v in prompt_inputs.items() if k not in ("input_ids", "attention_mask")}
+        # transformers 5.x derives the 3D RoPE positions from mm_token_type_ids, which the
+        # processor builds for the prompt only: extend it over the completion (0 = text)
+        for k in ("mm_token_type_ids", "token_type_ids"):
+            if torch.is_tensor(vis.get(k)):
+                t = vis[k]
+                t = torch.cat([t, t.new_zeros(t.size(0), ids.size(1) - t.size(1))], dim=1)
+                vis[k] = t.repeat_interleave(ids.size(0) // t.size(0), dim=0)
+        # keep the video timing so log-probs use the same temporal positions as sampling
+        spg = vis.get("second_per_grid_ts")
+        if spg is not None:
+            vis["second_per_grid_ts"] = spg.repeat(n) if torch.is_tensor(spg) else list(spg) * n
         if "pixel_values" in vis:
             vis["pixel_values"] = vis["pixel_values"].repeat(n, 1)
             vis["image_grid_thw"] = vis["image_grid_thw"].repeat(n, 1)
