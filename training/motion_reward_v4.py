@@ -39,6 +39,7 @@ MOTION_TASKS = {
 
 SCHEMA_BETA = float(os.environ.get("MCOT_SCHEMA_BETA", "0.5"))
 MATCH_TIME_THRESHOLD = 2.0  # seconds, same as v3
+MATCH_IOU_THRESHOLD = 0.3  # name-free fallback when the rollout's object name differs from the annotation
 
 
 def _task(kwargs) -> str:
@@ -171,9 +172,27 @@ def format_reward_notag(completions, **kwargs):
 # 3. Trajectory reward against GT (also used on transformed videos)
 # ============================================================================
 
-def _match_claims_to_gt(claims, gt_tracks_norm, gt_times):
-    """v3 matching: claim -> closest GT keyframe within 2 s, same object name."""
-    matched = {}
+def _box_iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _match_claims_to_gt(claims, gt_tracks_norm, gt_times, image_size=None):
+    """Claim -> closest GT keyframe within 2 s -> GT object at that frame.
+
+    The object is the GT object with the same normalized name if there is one,
+    otherwise the GT object whose box overlaps the claimed box most (IoU >=
+    MATCH_IOU_THRESHOLD). v3's r_s matches by time and IoU only; requiring the
+    exact annotation name (e.g. "man in black shirt" vs the rollout's "person")
+    left r_traj at 0 for correctly grounded objects.
+
+    Returns ``(matched, aliases)``: GT name -> set of matched GT times, and GT
+    name -> set of rollout object names that were matched to it.
+    """
+    matched, aliases = {}, {}
     for c in claims:
         best, best_dt = None, MATCH_TIME_THRESHOLD
         for t in gt_times:
@@ -182,27 +201,39 @@ def _match_claims_to_gt(claims, gt_tracks_norm, gt_times):
                 best, best_dt = t, dt
         if best is None:
             continue
+        at_frame = {}
         for name, track in gt_tracks_norm.items():
-            if mc.normalize_obj_name(name) == c["obj"] and any(abs(t - best) < 1e-6 for t, _ in track):
-                matched.setdefault(name, set()).add(best)
-                break
-    return matched
+            for t, b in track:
+                if abs(t - best) < 1e-6:
+                    at_frame[name] = b
+                    break
+        hit = next((n for n in at_frame if mc.normalize_obj_name(n) == c["obj"]), None)
+        if hit is None and at_frame:
+            claim_px = mc.to_pixels(c["box"], image_size)
+            ious = {n: _box_iou(claim_px, mc.to_pixels(b, image_size)) for n, b in at_frame.items()}
+            n_best = max(ious, key=ious.get)
+            if ious[n_best] >= MATCH_IOU_THRESHOLD:
+                hit = n_best
+        if hit is not None:
+            matched.setdefault(hit, set()).add(best)
+            aliases.setdefault(hit, set()).add(c["obj"])
+    return matched, aliases
 
 
 def trajectory_details(think: str, key_items, key_frames, image_size=None) -> List[Dict]:
     """Per GT object that the rollout grounded at >= 2 distinct GT frames."""
     gt_tracks = mc.tracks_from_key_items(key_items, key_frames)
     gt_times = sorted({float(f["time"]) for f in key_frames or []})
-    matched = _match_claims_to_gt(mc.parse_claims(think), gt_tracks, gt_times)
+    matched, aliases = _match_claims_to_gt(mc.parse_claims(think), gt_tracks, gt_times, image_size)
     all_tags = [t for t in mc.parse_tags(think) if t["well_formed"]]
     rows = []
     for name, frames in matched.items():
         if len(frames) < 2 or len(gt_tracks[name]) < 2:
             continue
-        key = mc.normalize_obj_name(name)
+        keys = {mc.normalize_obj_name(name)} | aliases.get(name, set())
         track_px = [(t, mc.to_pixels(b, image_size)) for t, b in gt_tracks[name]]
         target = mc.motion_descriptor(track_px)
-        obj_tags = [t for t in all_tags if t["obj"] == key and t["ref"] is None]
+        obj_tags = [t for t in all_tags if t["obj"] in keys and t["ref"] is None]
         piecewise = [t for t in obj_tags if t["from"] is not None and t["to"] is not None]
         if piecewise:
             score = mc.piecewise_score(piecewise, track_px)

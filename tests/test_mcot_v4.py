@@ -204,6 +204,25 @@ def test_trajectory_reward_v4():
     assert r[0] == pytest.approx(1.0) and r[1] == 0.0 and r[2] < 1.0
 
 
+def test_trajectory_reward_matches_renamed_object_by_iou():
+    """Rollout says "car", annotation says "red sedan": matched by box overlap, not name."""
+    items = {k: {"red sedan": v["car"]} for k, v in KEY_ITEMS.items()}
+    target = mc.gt_motion_from_key_items(items, KEY_FRAMES, image_size=(640, 480))["red sedan"]
+    good = f'<motion obj="car" dir="{target["dir"]}" speed="{target["speed"]}" scale="{target["scale"]}"/>'
+    kw = dict(task=["temporal-spatial free-form QA"] * 2, key_items=[items] * 2,
+              key_frames=[KEY_FRAMES] * 2, image_size=[(640, 480)] * 2)
+    far = "".join(f"<obj>car</obj><box>[0.8,0.8,0.9,0.9]</box>at<t>{2.0 * i}</t>s " for i in range(3))
+    r = mr.motion_trajectory_reward_v4(
+        [completion(car_rollout(good)), completion(f"<think>{far}{good}</think><answer>a</answer>")], **kw)
+    assert r[0] == pytest.approx(1.0) and r[1] == 0.0
+    # rollout boxes in pixels (Qwen2.5-VL absolute coords) against normalized annotations
+    px = "".join(f"<obj>car</obj><box>[{(0.1 + 0.2 * i) * 640:.0f},192,{(0.2 + 0.2 * i) * 640:.0f},240]</box>"
+                 f"at<t>{2.0 * i}</t>s " for i in range(3))
+    [r] = mr.motion_trajectory_reward_v4([completion(f"<think>{px}{good}</think><answer>a</answer>")],
+                                         **{k: v[:1] for k, v in kw.items()})
+    assert r == pytest.approx(1.0)
+
+
 def test_trajectory_reward_on_transformed_annotations():
     items2, frames2 = mc.transform_key_annotations(KEY_ITEMS, KEY_FRAMES, "reverse", duration=4.0)
     target = mc.gt_motion_from_key_items(items2, frames2, image_size=(640, 480))["car"]
