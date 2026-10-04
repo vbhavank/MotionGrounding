@@ -41,11 +41,57 @@ def add_model_args(ap):
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--backend", choices=["auto", "vllm", "hf"], default="auto",
+                    help="auto: vLLM when importable on a compute>=8.0 GPU, else transformers generate")
+
+
+def _use_vllm(args):
+    if args.backend != "auto":
+        return args.backend == "vllm"
+    try:
+        import torch
+        import vllm  # noqa: F401
+        return torch.cuda.get_device_capability(0) >= (8, 0)
+    except Exception:
+        return False
+
+
+class HFEngine:
+    """transformers.generate backend (no vLLM). Works on V100s: fp16 instead of bf16,
+    cuDNN disabled for the Conv3d patch embedding, SDPA attention."""
+
+    def __init__(self, args):
+        import torch
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, Qwen2VLForConditionalGeneration
+        self.torch, self.args = torch, args
+        pre_ampere = torch.cuda.get_device_capability(0) < (8, 0)
+        if pre_ampere:
+            torch.backends.cudnn.enabled = False
+        dtype = torch.float16 if pre_ampere else torch.bfloat16
+        cls = Qwen2VLForConditionalGeneration if "Qwen2-VL" in args.model_path else Qwen2_5_VLForConditionalGeneration
+        model = cls.from_pretrained(args.model_path, attn_implementation="sdpa")
+        self.model = model.to(dtype).to("cuda").eval()
+        self.processor = AutoProcessor.from_pretrained(args.model_path)
+        print(f"[eval] transformers backend, dtype={self.model.dtype}")
+
+    def generate_one(self, prompt, video):
+        torch = self.torch
+        v = torch.from_numpy(video) if not torch.is_tensor(video) else video
+        inputs = self.processor(text=[prompt], videos=[v], return_tensors="pt", padding=True).to("cuda")
+        sample = self.args.temperature > 0
+        with torch.inference_mode():
+            out = self.model.generate(**inputs, max_new_tokens=self.args.max_tokens, do_sample=sample,
+                                      temperature=self.args.temperature if sample else None,
+                                      repetition_penalty=1.05)
+        return self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
 
 
 def make_llm(args):
-    from vllm import LLM, SamplingParams
     from transformers import AutoProcessor
+    if not _use_vllm(args):
+        engine = HFEngine(args)
+        return engine, None, engine.processor
+    from vllm import LLM, SamplingParams
     llm = LLM(model=args.model_path, tensor_parallel_size=1, dtype="bfloat16",
               max_num_seqs=args.batch_size, gpu_memory_utilization=args.gpu_memory_utilization,
               limit_mm_per_prompt={"image": 32, "video": 10}, seed=args.seed)
@@ -58,7 +104,10 @@ def make_llm(args):
 
 def load_video(path, max_pixels, max_frames):
     """(T, C, H, W) uint8/float numpy array, as eval_motion_tags.py feeds vLLM."""
-    from qwen_vl_utils import process_vision_info
+    try:  # repo copy: decord -> OpenCV -> torchvision fallback (new torchvision has no read_video)
+        from vision_process import process_vision_info
+    except ImportError:
+        from qwen_vl_utils import process_vision_info
     msgs = [{"role": "user", "content": [{"type": "video", "video": path, "max_pixels": max_pixels,
                                           "max_frames": max_frames}]}]
     _, video_inputs, video_kwargs = process_vision_info(msgs, return_video_kwargs=True)
@@ -76,6 +125,13 @@ def build_prompt(processor, system, question, prefix=""):
 
 def generate(llm, sp, prompts_and_videos, batch_size=8):
     """prompts_and_videos: list of (prompt, video_array). Returns texts."""
+    if hasattr(llm, "generate_one"):
+        out = []
+        for i, (p, v) in enumerate(prompts_and_videos):
+            out.append(llm.generate_one(p, v))
+            if (i + 1) % 20 == 0 or i + 1 == len(prompts_and_videos):
+                print(f"  generated {i + 1}/{len(prompts_and_videos)}", flush=True)
+        return out
     out = []
     for i in range(0, len(prompts_and_videos), batch_size):
         chunk = prompts_and_videos[i:i + batch_size]
