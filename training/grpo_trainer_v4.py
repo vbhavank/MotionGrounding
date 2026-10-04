@@ -77,13 +77,19 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
         if dtype_name and isinstance(kwargs.get("model"), str):
             path, dtype = kwargs["model"], getattr(torch, dtype_name)
             cls = Qwen2VLForConditionalGeneration if "Qwen2-VL" in path else Qwen2_5_VLForConditionalGeneration
-            model = cls.from_pretrained(path, attn_implementation=kwargs.get("attn_implementation", "eager"))
+            attn = kwargs.get("attn_implementation") or "sdpa"
+            if dtype == torch.float16 and attn == "eager":
+                # eager attention overflows in fp16 (unscaled Q.K^T) -> NaN logits in sampling
+                print("[v4] fp16: eager attention overflows, using sdpa")
+                attn = "sdpa"
+            kwargs["attn_implementation"] = attn
+            model = cls.from_pretrained(path, attn_implementation=attn)
             model = model.to(dtype)
             if kwargs.get("args") is not None:
                 model.config.use_cache = not kwargs["args"].gradient_checkpointing
                 kwargs["args"].model_init_kwargs = None
             kwargs["model"] = model
-            print(f"[v4] model preloaded as {model.dtype}")
+            print(f"[v4] model preloaded as {model.dtype}, attention={attn}")
         super().__init__(*args, **kwargs)
         self.equiv_transforms = list(equiv_transforms or [])
         self.equiv_reward_funcs = list(equiv_reward_funcs or [])

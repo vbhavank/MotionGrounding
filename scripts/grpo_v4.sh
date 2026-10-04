@@ -26,6 +26,9 @@
 #   NPROC       GPUs on this node to use (default 2)
 #   extra args  appended last, so they override defaults, e.g. --num_generations 2
 #   PRECISION   bf16 (default, A100/H100) | fp16 (V100: also sets MCOT_DTYPE=float16)
+#   ATTN        attention implementation; default eager (bf16) / sdpa (fp16). Eager attention
+#               forms the unscaled Q.K^T in fp16, which overflows on Qwen2.5 and makes
+#               sampling fail with "probability tensor contains either inf, nan or element < 0"
 #
 # Example (3 seeds x 2 variants):
 #   for s in 42 43 44; do
@@ -47,8 +50,10 @@ PRECISION="${PRECISION:-bf16}"
 if [ "$PRECISION" = "fp16" ]; then
   PREC_ARGS=(--fp16 true --bf16 false)
   export MCOT_DTYPE=float16
+  ATTN="${ATTN:-sdpa}"
 else
   PREC_ARGS=(--bf16 true)
+  ATTN="${ATTN:-eager}"
 fi
 EXP_NAME="grpo_v4_${VARIANT}_s${SEED}_${SLURM_JOB_ID:-local}"
 OUT_DIR="outputs/${EXP_NAME}"
@@ -105,7 +110,7 @@ torchrun --nproc_per_node="$NPROC" --nnodes=1 --node_rank=0 \
     --equiv_num_generations 2 --equiv_per_step 1 \
     --max_prompt_length 16384 --max_completion_length 768 --max_pixels 401408 \
     --learning_rate 5e-7 --lr_scheduler_type cosine --weight_decay 0.01 \
-    "${PREC_ARGS[@]}" --gradient_checkpointing true --attn_implementation eager \
+    "${PREC_ARGS[@]}" --gradient_checkpointing true --attn_implementation "$ATTN" \
     --num_train_epochs 1 --beta 0.04 --max_grad_norm 5 \
     --logging_steps 25 --save_steps 200 --save_only_model true \
     --report_to wandb --run_name "$EXP_NAME" \
