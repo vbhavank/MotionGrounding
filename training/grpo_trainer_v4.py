@@ -45,8 +45,10 @@ from vision_process import process_vision_info
 
 try:
     from training import motion_core as mc
+    from training import motion_reward_v4 as mr4
 except ImportError:
     import motion_core as mc
+    import motion_reward_v4 as mr4
 
 VISION_SPECIAL_IDS = [151652, 151653, 151654, 151655, 151656]
 MOTION_TASKS = {"temporal-spatial free-form QA", "General video QA Free-form", "General video QA MCQ"}
@@ -389,4 +391,8 @@ class Qwen2VLGRPOTrainerV4(Qwen2VLGRPOTrainer):
         self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std.reshape(1)).mean().item())
         self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl.reshape(1)).mean().item())
         self._metrics["equiv/num_views"].append(float(len(views)))
+        # share of objects grounded >= 2 times whose boxes are all identical (copying)
+        rates = [r for r in (mr4.copied_box_rate(mc.extract_think(t) or "") for t in gen["texts"]) if r is not None]
+        if rates:
+            self._metrics["grounding/copied_box_rate"].append(float(np.mean(rates)))
         return loss

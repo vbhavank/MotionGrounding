@@ -22,7 +22,7 @@ Changes relative to motion_reward_v3 (see revision/README.md for the rationale):
 
 import os
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -71,25 +71,90 @@ def last_tag_per_object(think: str) -> Dict[str, Dict]:
 # 1. Self-consistency  r_self
 # ============================================================================
 
-def self_consistency_details(think: str, image_size=None) -> List[Dict]:
-    """Per-tag record: the tag, M(T_hat) over its evidence window, and scores."""
+SELF_IOU_FULL = 0.5  # a claimed box counts as fully grounded at IoU >= this with the GT box
+
+
+def grounding_factor(win, gt_tracks, image_size=None) -> Optional[float]:
+    """How well the boxes behind a tag sit on the annotated object, in [0, 1].
+
+    The GT object is the one with the tag's (normalized) name, else the GT
+    object the claimed boxes overlap most. Each claim is compared with that
+    object's GT box at the nearest GT time within MATCH_TIME_THRESHOLD; the
+    factor is min over claims of min(1, IoU / SELF_IOU_FULL), so a single
+    off-object box (e.g. a box copied from an earlier time while the object
+    moved) removes the credit. ``None`` when the object is not annotated or no
+    claim falls near a GT time: the tag cannot be checked and keeps its score.
+    """
+    if not gt_tracks or not win:
+        return None
+
+    def ious(track):
+        out = []
+        for c in win:
+            near = [(abs(t - c["t"]), b) for t, b in track if abs(t - c["t"]) < MATCH_TIME_THRESHOLD]
+            if near:
+                b = min(near, key=lambda x: x[0])[1]
+                out.append(_box_iou(mc.to_pixels(c["box"], image_size), mc.to_pixels(b, image_size)))
+        return out
+
+    obj = win[0]["obj"]
+    name = next((n for n in gt_tracks if mc.normalize_obj_name(n) == obj), None)
+    if name is None:
+        scored = {n: ious(tr) for n, tr in gt_tracks.items()}
+        scored = {n: v for n, v in scored.items() if v and max(v) >= MATCH_IOU_THRESHOLD}
+        if not scored:
+            return None
+        name = max(scored, key=lambda n: float(np.mean(scored[n])))
+    vals = ious(gt_tracks[name])
+    if not vals:
+        return None
+    return float(min(min(1.0, v / SELF_IOU_FULL) for v in vals))
+
+
+def self_consistency_details(think: str, image_size=None, key_items=None, key_frames=None) -> List[Dict]:
+    """Per-tag record: the tag, M(T_hat) over its evidence window, and scores.
+
+    With GT annotations (``key_items``/``key_frames``) the score is multiplied by
+    ``grounding_factor``: agreeing with one's own boxes only counts when those
+    boxes are on the object. Without it, copying one box across timestamps and
+    tagging STAT is perfectly "self-consistent" (SFT model on held-out data: 1-3
+    of 32-39 objects grounded twice had distinct boxes, SC 0.86-0.93).
+    """
+    gt_tracks = mc.tracks_from_key_items(key_items, key_frames) if key_items and key_frames else {}
     rows = []
     for tag, win in mc.tag_evidence_windows(think):
         n_ts = len({round(c["t"], 3) for c in win})
-        row = {"tag": tag, "n_timestamps": n_ts, "implied": None,
+        row = {"tag": tag, "n_timestamps": n_ts, "implied": None, "grounding": None,
+               "copied": n_ts >= 2 and len({tuple(c["box"]) for c in win}) == 1,
                "score": 0.0, "consistent": False, "schema_ok": n_ts >= 2}
         if tag["well_formed"] and n_ts >= 2:
             implied = mc.motion_descriptor(mc.claims_to_track(win, image_size))
             row["implied"] = implied
             row["score"] = mc.tag_score(tag, implied)
             row["consistent"] = mc.tag_equal(tag, implied)
+            g = grounding_factor(win, gt_tracks, image_size)
+            if g is not None:
+                row["grounding"] = g
+                row["score"] *= g
         rows.append(row)
     return rows
 
 
+def copied_box_rate(think: str) -> Optional[float]:
+    """Fraction of objects grounded at >= 2 timestamps whose boxes are all identical."""
+    by = {}
+    for c in mc.parse_claims(think or ""):
+        by.setdefault(c["obj"], []).append(c)
+    multi = [cl for cl in by.values() if len({round(c["t"], 3) for c in cl}) >= 2]
+    if not multi:
+        return None
+    return sum(len({tuple(c["box"]) for c in cl}) == 1 for cl in multi) / len(multi)
+
+
 def motion_self_consistency_reward(completions, **kwargs):
-    """r_self = mean over tags of tag_score(tag, M(T_hat_o)); tags without two
-    grounded timestamps score 0 (and are separately penalized in r_fmt)."""
+    """r_self = mean over tags of tag_score(tag, M(T_hat_o)) x grounding factor;
+    tags without two grounded timestamps score 0 (and are separately penalized
+    in r_fmt)."""
     task = _task(kwargs)
     rewards = []
     for i, completion in enumerate(completions):
@@ -97,7 +162,8 @@ def motion_self_consistency_reward(completions, **kwargs):
         if task not in MOTION_TASKS or think is None:
             rewards.append(0.0)
             continue
-        rows = self_consistency_details(think, _at(kwargs, "image_size", i))
+        rows = self_consistency_details(think, _at(kwargs, "image_size", i),
+                                        _at(kwargs, "key_items", i), _at(kwargs, "key_frames", i))
         rewards.append(float(np.mean([r["score"] for r in rows])) if rows else 0.0)
     return rewards
 

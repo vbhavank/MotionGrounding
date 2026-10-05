@@ -107,6 +107,8 @@ def self_consistency(texts: Iterable[str], image_size=None) -> Dict:
         "schema_violation_rate": sum(not r["schema_ok"] for r in rows) / len(rows) if rows else None,
         "frac_tags_on_static_boxes": len(stat_when_static) / len(evaluable) if evaluable else None,
         "moving_tag_on_static_boxes": sum(r["tag"]["dir"] != "STAT" for r in stat_when_static),
+        # boxes identical at every timestamp: "static" because copied, not because observed
+        "frac_tags_on_copied_boxes": sum(r["copied"] for r in evaluable) / len(evaluable) if evaluable else None,
     }
 
 

@@ -223,6 +223,30 @@ def test_trajectory_reward_matches_renamed_object_by_iou():
     assert r == pytest.approx(1.0)
 
 
+def test_self_consistency_needs_grounded_boxes():
+    """Copying one box and tagging STAT is self-consistent but not grounded."""
+    task = ["temporal-spatial free-form QA"]
+    kw = dict(task=task, key_items=[KEY_ITEMS], key_frames=[KEY_FRAMES], image_size=[(640, 480)])
+    copied = "".join(f"<obj>car</obj><box>[0.1,0.4,0.2,0.5]</box>at<t>{2.0 * i}</t>s " for i in range(3))
+    stat = '<motion obj="car" dir="STAT" speed="stationary" scale="stable"/>'
+    [r_copy] = mr.motion_self_consistency_reward(
+        [completion(f"<think>{copied}{stat}</think><answer>a</answer>")], **kw)
+    [r_nogt] = mr.motion_self_consistency_reward(
+        [completion(f"<think>{copied}{stat}</think><answer>a</answer>")], task=task)
+    assert r_copy == pytest.approx(0.0) and r_nogt == pytest.approx(1.0)
+    target = mc.gt_motion_from_key_items(KEY_ITEMS, KEY_FRAMES, image_size=(640, 480))["car"]
+    good = f'<motion obj="car" dir="{target["dir"]}" speed="{target["speed"]}" scale="{target["scale"]}"/>'
+    [r_good] = mr.motion_self_consistency_reward([completion(car_rollout(good))], **kw)
+    assert r_good == pytest.approx(1.0)
+    # a static object, correctly boxed at the same place every time, keeps full credit
+    still = {k: {"car": [[0.1, 0.4, 0.2, 0.5]]} for k in KEY_ITEMS}
+    [r_still] = mr.motion_self_consistency_reward(
+        [completion(f"<think>{copied}{stat}</think><answer>a</answer>")],
+        task=task, key_items=[still], key_frames=[KEY_FRAMES], image_size=[(640, 480)])
+    assert r_still == pytest.approx(1.0)
+    assert mr.copied_box_rate(copied) == 1.0 and mr.copied_box_rate(mc.extract_think(car_rollout(""))) == 0.0
+
+
 def test_trajectory_reward_on_transformed_annotations():
     items2, frames2 = mc.transform_key_annotations(KEY_ITEMS, KEY_FRAMES, "reverse", duration=4.0)
     target = mc.gt_motion_from_key_items(items2, frames2, image_size=(640, 480))["car"]
