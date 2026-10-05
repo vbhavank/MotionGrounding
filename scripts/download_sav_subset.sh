@@ -21,7 +21,9 @@
 #   OUT_DIR     e.g. $OO3/videos/stgr/plm   -> videos land in OUT_DIR/videos/
 #   JSON        STGR-SFT.json, STGR-RL.json, the Motion-o PLM json, ...
 #
-# Env: KEEP_TARS=1 keeps the shards; SHARDS="000 036" restricts to those shards.
+# Env: KEEP_TARS=1 keeps the shards; SHARDS="000 036 val test" restricts to those shards.
+# sav_val.tar / sav_test.tar (JPEG frames, no mp4) are handled too: the needed
+# frame folders are extracted and re-encoded to <id>.mp4 at their frame rate.
 
 set -uo pipefail
 
@@ -43,9 +45,34 @@ N_NEEDED=$(wc -l < "$WORK/needed_ids.txt")
 echo "needed SA-V videos: $N_NEEDED"
 [ "$N_NEEDED" -eq 0 ] && { echo "no sav_*.mp4 ids found in the given json files"; exit 1; }
 
-# fixed strings matched against tar member names
+# fixed strings matched against tar member names: train shards hold <id>.mp4,
+# sav_val.tar / sav_test.tar hold JPEG frames in .../<id>/NNNNN.jpg
 sed -e 's/$/.mp4/' "$WORK/needed_ids.txt" > "$WORK/patterns.txt"
 sed -e 's/$/_manual.json/' "$WORK/needed_ids.txt" >> "$WORK/patterns.txt"
+sed -e 's|^|/|' -e 's|$|/|' "$WORK/needed_ids.txt" >> "$WORK/patterns.txt"
+
+# frames -> <id>.mp4 at the folder's frame rate (".../JPEGImages_24fps/<id>/"), default 24
+frames_to_mp4() {
+    python3 - "$1" "$2" <<'PY'
+import glob, os, re, sys
+import cv2
+root, out = sys.argv[1], sys.argv[2]
+dirs = sorted({os.path.dirname(p) for p in glob.glob(os.path.join(root, "**", "*.jpg"), recursive=True)})
+for d in dirs:
+    vid = os.path.basename(d)
+    if not re.fullmatch(r"sav_\d+", vid) or os.path.exists(os.path.join(out, vid + ".mp4")):
+        continue
+    m = re.search(r"(\d+)fps", d)
+    fps = float(m.group(1)) if m else 24.0
+    frames = sorted(glob.glob(os.path.join(d, "*.jpg")))
+    h, w = cv2.imread(frames[0]).shape[:2]
+    vw = cv2.VideoWriter(os.path.join(out, vid + ".mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    for f in frames:
+        vw.write(cv2.imread(f))
+    vw.release()
+    print(f"  encoded {vid}: {len(frames)} frames at {fps:g} fps")
+PY
+}
 
 url_of() { awk -v n="$1" '$1 == n {print $2}' "$LINKS"; }
 
@@ -56,7 +83,7 @@ fi
 
 have() { ls "$OUT/videos" | grep -c '^sav_.*\.mp4$'; }
 
-for name in $(awk '$1 ~ /^sav_[0-9][0-9][0-9]\.tar$/ {print $1}' "$LINKS"); do
+for name in $(awk '$1 ~ /^sav_([0-9][0-9][0-9]|val|test)\.tar$/ {print $1}' "$LINKS"); do
     shard=${name#sav_}; shard=${shard%.tar}
     if [ -n "${SHARDS:-}" ] && ! grep -qw "$shard" <<< "$SHARDS"; then continue; fi
     [ -f "$WORK/$name.done" ] && { echo "skip $name (done)"; continue; }
@@ -79,9 +106,19 @@ for name in $(awk '$1 ~ /^sav_[0-9][0-9][0-9]\.tar$/ {print $1}' "$LINKS"); do
     n_keep=$(wc -l < "$WORK/$name.keep")
     echo "  members $(wc -l < "$WORK/$name.members"), keeping $n_keep"
     if [ "$n_keep" -gt 0 ]; then
+        grep -v '\.jpg$' "$WORK/$name.keep" | grep -v '/$' > "$WORK/$name.keep_files" || true
+        grep '\.jpg$' "$WORK/$name.keep" > "$WORK/$name.keep_jpg" || true
         # -C must precede -T: tar applies -C only to member names listed after it
-        tar -xf "$WORK/$name" -C "$OUT/videos" --transform='s|.*/||' -T "$WORK/$name.keep"
-        mv "$OUT"/videos/*_manual.json "$OUT/sav_annotations/" 2>/dev/null || true
+        if [ -s "$WORK/$name.keep_files" ]; then
+            tar -xf "$WORK/$name" -C "$OUT/videos" --transform='s|.*/||' -T "$WORK/$name.keep_files"
+            mv "$OUT"/videos/*_manual.json "$OUT/sav_annotations/" 2>/dev/null || true
+        fi
+        if [ -s "$WORK/$name.keep_jpg" ]; then
+            mkdir -p "$WORK/frames"
+            tar -xf "$WORK/$name" -C "$WORK/frames" -T "$WORK/$name.keep_jpg"
+            frames_to_mp4 "$WORK/frames" "$OUT/videos"
+            rm -rf "$WORK/frames"
+        fi
     fi
     [ "${KEEP_TARS:-0}" = "1" ] || rm -f "$WORK/$name"
     touch "$WORK/$name.done"
