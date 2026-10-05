@@ -16,7 +16,7 @@ Flags per track (normalized boxes; >= 3 observations for the alternation test):
     python scripts/audit_gt_tracks.py --inputs $J/splits_v4/eval_heldout.json \
         $J/splits_v4/sft_v4.json $J/splits_v4/rl_v4_sub800_kf.json \
         --clean $J/splits_v4/eval_heldout.json --drop alternating
-    -> eval_heldout_clean.json: flagged objects removed from key_items (their GT
+    -> eval_heldout_clean.json (--suffix): flagged objects removed from key_items (their GT
        label and oracle boxes disappear; other objects in the sample stay)
 """
 
@@ -93,6 +93,7 @@ def main():
     ap.add_argument("--inputs", nargs="+", required=True)
     ap.add_argument("--clean", nargs="*", default=[], help="files to write *_clean.json for")
     ap.add_argument("--drop", choices=["alternating", "any"], default="alternating")
+    ap.add_argument("--suffix", default="_clean", help="output name: <input><suffix>.json")
     ap.add_argument("--jump", type=float, default=0.35)
     ap.add_argument("--jump_dt", type=float, default=2.0)
     ap.add_argument("--show", type=int, default=3, help="print this many flagged examples per file")
@@ -127,7 +128,7 @@ def main():
                                       for k, v in r["key_items"].items()}
                     dropped += len(kill)
                 out.append(r)
-            dst = re.sub(r"\.json$", "_clean.json", path)
+            dst = re.sub(r"\.json$", f"{args.suffix}.json", path)
             json.dump(out, open(dst, "w"), indent=1)
             print(f"  -> {dst}: removed {dropped} flagged objects ({args.drop})")
 
