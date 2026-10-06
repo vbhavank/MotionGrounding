@@ -136,6 +136,11 @@ def self_consistency_details(think: str, image_size=None, key_items=None, key_fr
             if g is not None:
                 row["grounding"] = g
                 row["score"] *= g
+            elif row["copied"]:
+                # unverifiable object with one box repeated at every timestamp: no motion
+                # evidence, and RL learned to farm r_self this way (copy + STAT on
+                # unannotated objects; held-out copied-box tags rose to 98%)
+                row["score"] = 0.0
         rows.append(row)
     return rows
 

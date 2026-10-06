@@ -138,11 +138,15 @@ def test_transform_frames_numpy():
 def test_self_consistency_flags_duck_example():
     rows = mr.self_consistency_details(mc.extract_think(DUCK))
     assert len(rows) == 1 and rows[0]["implied"] == mc.STATIONARY_TAG and not rows[0]["consistent"]
+    assert rows[0]["copied"]
+    # one box repeated at every timestamp, no annotation to confirm it: no credit either way
+    # (copy + STAT was how RL farmed r_self), even though the STAT tag "agrees" with the boxes
     [r] = mr.motion_self_consistency_reward([completion(DUCK)], task=["temporal-spatial free-form QA"])
-    assert r == pytest.approx(mc.W_SCALE)  # only scale=stable agrees
+    assert r == 0.0
     fixed = DUCK.replace('dir="E" speed="moderate"', 'dir="STAT" speed="stationary"')
+    assert mr.self_consistency_details(mc.extract_think(fixed))[0]["consistent"]
     [r] = mr.motion_self_consistency_reward([completion(fixed)], task=["temporal-spatial free-form QA"])
-    assert r == pytest.approx(1.0)
+    assert r == 0.0
 
 
 def test_consecutive_tags_use_contiguous_windows():
@@ -233,7 +237,7 @@ def test_self_consistency_needs_grounded_boxes():
         [completion(f"<think>{copied}{stat}</think><answer>a</answer>")], **kw)
     [r_nogt] = mr.motion_self_consistency_reward(
         [completion(f"<think>{copied}{stat}</think><answer>a</answer>")], task=task)
-    assert r_copy == pytest.approx(0.0) and r_nogt == pytest.approx(1.0)
+    assert r_copy == pytest.approx(0.0) and r_nogt == pytest.approx(0.0)
     target = mc.gt_motion_from_key_items(KEY_ITEMS, KEY_FRAMES, image_size=(640, 480))["car"]
     good = f'<motion obj="car" dir="{target["dir"]}" speed="{target["speed"]}" scale="{target["scale"]}"/>'
     [r_good] = mr.motion_self_consistency_reward([completion(car_rollout(good))], **kw)
