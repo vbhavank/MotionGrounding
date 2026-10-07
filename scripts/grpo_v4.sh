@@ -24,8 +24,10 @@
 #   LAMBDA_SELF weight of r_self (default 0.5)
 #   EQUIV       transformations, default "reverse hflip freeze"
 #   NPROC       GPUs on this node to use (default 2)
-#   OUT_DIR     default outputs/grpo_v4_<variant>_s<seed>_<job>; reruns resume from its latest
-#               checkpoint. QUICK_TEST=true uses a separate *_quicktest dir, wiped on each run.
+#   OUT_DIR     default outputs/grpo_v4_<variant>_s<seed>; rerunning the same command resumes
+#               from its newest complete checkpoint (optimizer, LR schedule, RNG and data position).
+#               QUICK_TEST=true uses a separate *_quicktest dir, wiped on each run.
+#   SAVE_STEPS  checkpoint every N optimizer steps (default 50; the last 3 are kept)
 #   extra args  appended last, so they override defaults, e.g. --num_generations 2
 #   PRECISION   bf16 (default, A100/H100) | fp16 (V100: also sets MCOT_DTYPE=float16)
 #   ATTN        attention implementation; default eager (bf16) / sdpa (fp16). Eager attention
@@ -49,6 +51,7 @@ DATASET_JSON="${DATASET_JSON:?set DATASET_JSON to the RL json}"
 MASTER_PORT="${MASTER_PORT:-12331}"
 NPROC="${NPROC:-2}"
 PRECISION="${PRECISION:-bf16}"
+SAVE_STEPS="${SAVE_STEPS:-50}"
 if [ "$PRECISION" = "fp16" ]; then
   PREC_ARGS=(--fp16 true --bf16 false)
   export MCOT_DTYPE=float16
@@ -57,7 +60,8 @@ else
   PREC_ARGS=(--bf16 true)
   ATTN="${ATTN:-eager}"
 fi
-EXP_NAME="grpo_v4_${VARIANT}_s${SEED}_${SLURM_JOB_ID:-local}"
+# no job id in the name: a rerun in a new allocation finds the same folder and resumes
+EXP_NAME="grpo_v4_${VARIANT}_s${SEED}"
 QUICK_TEST="${QUICK_TEST:-false}"
 [ "$QUICK_TEST" = "true" ] && EXP_NAME="${EXP_NAME}_quicktest"
 OUT_DIR="${OUT_DIR:-outputs/${EXP_NAME}}"
@@ -101,8 +105,17 @@ RESUME_ARG=()
 if [ "$QUICK_TEST" = "true" ]; then
   case "$OUT_DIR" in *_quicktest) rm -rf "$OUT_DIR" ;; esac
 else
-  LATEST_CKPT=$(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
-  [ -n "$LATEST_CKPT" ] && RESUME_ARG=(--resume_from_checkpoint "$LATEST_CKPT")
+  # newest complete checkpoint: trainer_state.json is written last, so a checkpoint cut off
+  # mid-save (job killed) is skipped; optimizer.pt is absent in save_only_model checkpoints
+  LATEST_CKPT=""
+  for c in $(ls -d "${OUT_DIR}"/checkpoint-* 2>/dev/null | sort -V -r); do
+    if [ -f "$c/trainer_state.json" ] && [ -f "$c/optimizer.pt" ]; then LATEST_CKPT=$c; break; fi
+    echo "skipping incomplete checkpoint $c"
+  done
+  if [ -n "$LATEST_CKPT" ]; then
+    echo "resuming from $LATEST_CKPT"
+    RESUME_ARG=(--resume_from_checkpoint "$LATEST_CKPT")
+  fi
 fi
 
 echo "variant=$VARIANT seed=$SEED model=$MODEL_PATH data=$DATASET_JSON out=$OUT_DIR"
@@ -122,7 +135,7 @@ torchrun --nproc_per_node="$NPROC" --nnodes=1 --node_rank=0 \
     --learning_rate 5e-7 --lr_scheduler_type cosine --weight_decay 0.01 \
     "${PREC_ARGS[@]}" --gradient_checkpointing true --attn_implementation "$ATTN" \
     --num_train_epochs 1 --beta 0.04 --max_grad_norm 5 \
-    --logging_steps 25 --save_steps 200 --save_only_model true \
+    --logging_steps 25 --save_steps "$SAVE_STEPS" --save_total_limit 3 --save_only_model false \
     --report_to wandb --run_name "$EXP_NAME" \
     --seed "$SEED" --data_seed "$SEED" \
     --gen_temperature 0.7 \
